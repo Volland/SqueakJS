@@ -606,32 +606,16 @@ to single-step.
                 "} else { vm.pc = ", this.pc, "; vm.sendSpecial(1); if (context !== vm.activeContext || vm.breakOutOfInterpreter !== false) return}\n");
                 return;
             case 0xB2: // LESS <
-                this.needsVar['stack'] = true;
-                this.source.push("var a = stack[vm.sp - 1], b = stack[vm.sp];\n",
-                "if (typeof a === 'number' && typeof b === 'number') {\n",
-                "   stack[--vm.sp] = a < b ? vm.trueObj : vm.falseObj;\n",
-                "} else { vm.pc = ", this.pc, "; vm.sendSpecial(2); if (context !== vm.activeContext || vm.breakOutOfInterpreter !== false) return}\n");
+                this.generateComparison(2, "<");
                 return;
             case 0xB3: // GRTR >
-                this.needsVar['stack'] = true;
-                this.source.push("var a = stack[vm.sp - 1], b = stack[vm.sp];\n",
-                "if (typeof a === 'number' && typeof b === 'number') {\n",
-                "   stack[--vm.sp] = a > b ? vm.trueObj : vm.falseObj;\n",
-                "} else { vm.pc = ", this.pc, "; vm.sendSpecial(3); if (context !== vm.activeContext || vm.breakOutOfInterpreter !== false) return}\n");
+                this.generateComparison(3, ">");
                 return;
             case 0xB4: // LEQ <=
-                this.needsVar['stack'] = true;
-                this.source.push("var a = stack[vm.sp - 1], b = stack[vm.sp];\n",
-                "if (typeof a === 'number' && typeof b === 'number') {\n",
-                "   stack[--vm.sp] = a <= b ? vm.trueObj : vm.falseObj;\n",
-                "} else { vm.pc = ", this.pc, "; vm.sendSpecial(4); if (context !== vm.activeContext || vm.breakOutOfInterpreter !== false) return}\n");
+                this.generateComparison(4, "<=");
                 return;
             case 0xB5: // GEQ >=
-                this.needsVar['stack'] = true;
-                this.source.push("var a = stack[vm.sp - 1], b = stack[vm.sp];\n",
-                "if (typeof a === 'number' && typeof b === 'number') {\n",
-                "   stack[--vm.sp] = a >= b ? vm.trueObj : vm.falseObj;\n",
-                "} else { vm.pc = ", this.pc, "; vm.sendSpecial(5); if (context !== vm.activeContext || vm.breakOutOfInterpreter !== false) return}\n");
+                this.generateComparison(5, ">=");
                 return;
             case 0xB6: // EQU =
                 this.needsVar['stack'] = true;
@@ -676,6 +660,47 @@ to single-step.
                 this.source.push("vm.success = true; if(!vm.pop2AndPushIntResult(vm.stackInteger(1) | vm.stackInteger(0))) { vm.pc = ", this.pc, "; vm.sendSpecial(15); return}\n");
                 return;
         }
+    },
+    generateComparison: function(special, operator) {
+        this.needsVar['stack'] = true;
+        // check if this comparison is followed by conditional jump
+        var size, condition, distance;
+        var byte1 = this.method.bytes[this.pc];
+        switch (byte1 & 0xF8) {
+            // short conditional jump
+            case 0x98:
+                size = 1;
+                condition = false,
+                distance = (byte1 & 0x07) + 1;
+                break;
+            // long conditional jump
+            case 0xA8:
+                size = 2;
+                var byte2 = this.method.bytes[this.pc+1];
+                condition = byte1 < 0xAC,
+                distance = (byte1 & 3) * 256 + byte2;
+                break;
+            // simple case: comparison not followed by jump
+            default:
+                this.source.push("var a = stack[vm.sp - 1], b = stack[vm.sp];\n",
+                "if (typeof a === 'number' && typeof b === 'number') {\n",
+                "   stack[--vm.sp] = a ", operator, " b ? vm.trueObj : vm.falseObj;\n",
+                "} else { vm.pc = ", this.pc, "; vm.sendSpecial(", special, "); if (context !== vm.activeContext || vm.breakOutOfInterpreter !== false) return}\n");
+                return;
+        }
+        // generate comparison with conditional jump
+        // if both operands are SmallInts there's no need for mustBeBoolean checks etc
+        var destNoJump = this.pc + size,
+            destJump = destNoJump + distance;
+        this.source.push("var a = stack[vm.sp - 1], b = stack[vm.sp];\n",
+        "if (typeof a === 'number' && typeof b === 'number') {\n",
+        "vm.sp -= 2; vm.pc = (a ", operator, " b) === ", condition, " ? ", destJump, " : ", destNoJump, "; ");
+        if (this.singleStep) this.source.push("if (vm.breakOutOfInterpreter) return; else ");
+        this.source.push("continue;\n",
+        "} else {vm.pc = ", this.pc, "; vm.sendSpecial(", special, "); if (context !== vm.activeContext || vm.breakOutOfInterpreter !== false) return;}\n");
+        this.needsLabel[destNoJump] = true;
+        this.needsLabel[destJump] = true;
+        if (destJump > this.endPC) this.endPC = destJump;
     },
     generateSend: function(prefix, num, suffix, numArgs, superSend) {
         if (this.debug) this.generateDebugCode("send " + (prefix === "lit[" ? this.method.pointers[num].bytesAsString() : "..."));
